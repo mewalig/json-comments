@@ -1,10 +1,12 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 
 static int read_to_delim_or_eof(FILE *f_in, FILE *f_out, const char delim) {
+  int prior_c = 0;
   int c;
-  while((c = fgetc(f_in)) != EOF && c != delim) {
+  while((c = fgetc(f_in)) != EOF && !(c == delim && prior_c != '\\')) {
     if(f_out) {
       if(c == '\t')
         fwrite("\t", 1, 2, f_out);
@@ -15,9 +17,18 @@ static int read_to_delim_or_eof(FILE *f_in, FILE *f_out, const char delim) {
       else
         fwrite(&c, 1, 1, f_out);
     }
+    prior_c = c;
   }
   return c;
 }
+
+static int read_value(FILE *f_in, FILE *f_out, const char *delims) {
+  int c;
+  while((c = fgetc(f_in)) != EOF && !strchr(delims, c))
+    fwrite(&c, 1, 1, f_out);
+  return c;
+}
+
 
 #define JSON_COMMENT_MODE_STRIP 0
 #define JSON_COMMENT_MODE_APPLY 1
@@ -55,6 +66,8 @@ static char get_next_comment(FILE *comment_file, struct comment *next_comment) {
       next_comment->i = i;
       if(len)
         next_comment->line[len] = '\0';
+      while(len && isspace(next_comment->line[len-1]))
+        next_comment->line[--len] = '\0';
       return (c != EOF);
     }
   }
@@ -105,10 +118,19 @@ int main(int argc, char *argv[]) {
   
   unsigned int element_count = 0;
   int c, prior_c = -1;
-  
+  char no_get = 0;
+
   do {
-    c = fgetc(f_in);
+    if(no_get)
+      no_get = 0;
+    else
+      c = fgetc(f_in);
     switch(c) {
+    case '\n': case '\r': case ' ': case '\t': case '\v': case '\f': // whitespace
+      if(mode == JSON_COMMENT_MODE_APPLY)
+        fwrite(&c, 1, 1, f_out);
+      continue;
+    case ',':
     case ':':
     case '{':
     case '}':
@@ -128,18 +150,28 @@ int main(int argc, char *argv[]) {
           c = read_to_delim_or_eof(f_in, stripped_comments_file, '\n');
           fwrite("\n", 1, 1, stripped_comments_file);
           prior_c = -1;
-          // if(c != EOF)
-          // c = fgetc(f_in);
         }
       }
       break;
+    default: // value. scan to first delimiter 
+      if(c != EOF) {
+        fwrite(&c, 1, 1, f_out);
+        c = read_value(f_in, f_out, "\n\r \t\v\f,{}[]\"");
+        element_count++;
+
+        if(strchr("\n\r \t\v\f,{}[]\"", c)) {
+          no_get = 1;
+          continue;
+        }
+      }
     }
 
     prior_c = c;
 
     if(c != EOF) {
       if(c != '/')
-        fwrite(&c, 1, 1, f_out);
+        if(mode == JSON_COMMENT_MODE_APPLY || !isspace(c))
+          fwrite(&c, 1, 1, f_out);
       if(have_next_comment && element_count == next_comment.i) {
         fprintf(f_out, " //%s", next_comment.line);
         have_next_comment = get_next_comment(stripped_comments_file, &next_comment);
